@@ -1,13 +1,28 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   AGENT_STATUS_STALE_AFTER_MS,
   type AgentStatusEntry
 } from '../../../../shared/agent-status-types'
+
+const mocks = vi.hoisted(() => ({
+  activateAndRevealWorktree: vi.fn(),
+  getState: vi.fn(() => ({ tabsByWorktree: {} }))
+}))
+
+vi.mock('@/store', () => ({ useAppStore: { getState: mocks.getState } }))
+vi.mock('@/lib/worktree-activation', () => ({
+  activateAndRevealWorktree: mocks.activateAndRevealWorktree
+}))
+
 import {
+  focusAttentionTarget,
   listAttentionPanes,
   pickNextAttentionTarget,
-  pickNextAttentionWorktree
+  pickNextAttentionWorktree,
+  resolveFocusedAttentionPaneKey
 } from './next-attention-target'
+import { structuredAgentSessionPaneKey } from '../../../../shared/structured-agent-session-projection'
+import type { Tab } from '../../../../shared/tab-types'
 import type { WorktreeAttention } from './smart-attention'
 
 const NOW = new Date('2026-09-19T12:00:00.000Z').getTime()
@@ -156,5 +171,60 @@ describe('pickNextAttentionTarget', () => {
         now: NOW
       })
     ).toBeNull()
+  })
+})
+
+describe('focusAttentionTarget', () => {
+  it('activates a host-qualified worktree on its own execution host', () => {
+    focusAttentionTarget({ worktreeId: 'wt-remote', pane: null, executionHostId: 'ssh:devbox' })
+
+    expect(mocks.activateAndRevealWorktree).toHaveBeenCalledWith('wt-remote', {
+      executionHostId: 'ssh:devbox'
+    })
+  })
+})
+
+describe('resolveFocusedAttentionPaneKey', () => {
+  const chatTab: Tab = {
+    id: 'chat-tab',
+    entityId: 'session-1',
+    groupId: 'group-1',
+    worktreeId: 'wt-a',
+    contentType: 'agent-session',
+    label: 'Claude',
+    customLabel: null,
+    color: null,
+    sortOrder: 0,
+    createdAt: 0
+  }
+  const chatPaneKey = structuredAgentSessionPaneKey(chatTab.id, chatTab.entityId)
+  const focusedState = {
+    activeWorktreeId: 'wt-a',
+    activeTabType: 'agent-session' as const,
+    activeTabId: null,
+    tabsByWorktree: {},
+    terminalLayoutsByTabId: {},
+    agentStatusByPaneKey: {},
+    retainedAgentsByPaneKey: {},
+    migrationUnsupportedByPtyId: {},
+    getActiveTab: () => chatTab
+  }
+
+  it('keys a focused structured chat tab so repeated presses advance past it', () => {
+    const focusedPaneKey = resolveFocusedAttentionPaneKey(focusedState)
+    expect(focusedPaneKey).toBe(chatPaneKey)
+
+    const next = pickNextAttentionTarget({
+      attentionByWorktree: new Map([['wt-a', waiting(NOW)]]),
+      activeWorktreeId: 'wt-a',
+      focusedPaneKey,
+      ownedTabIds: () => new Set([chatTab.id, 'tab-term']),
+      agentStatusByPaneKey: byPaneKey([
+        makeEntry({ paneKey: chatPaneKey, stateStartedAt: NOW }),
+        makeEntry({ paneKey: `tab-term:${LEAF_1}`, stateStartedAt: NOW - 1_000 })
+      ]),
+      now: NOW
+    })
+    expect(next?.pane?.paneKey).toBe(`tab-term:${LEAF_1}`)
   })
 })

@@ -8,8 +8,14 @@ import {
   AGENT_STATUS_STALE_AFTER_MS,
   type AgentStatusEntry
 } from '../../../../shared/agent-status-types'
+import type { AppState } from '@/store/types'
+import type { ExecutionHostId } from '../../../../shared/execution-host'
 import { parsePaneKey } from '../../../../shared/stable-pane-id'
-import { getFocusedAgentPaneKeyForWorktree } from './focused-agent-row-highlight'
+import { structuredAgentSessionPaneKey } from '../../../../shared/structured-agent-session-projection'
+import {
+  getFocusedAgentPaneKeyForWorktree,
+  type FocusedAgentRowHighlightState
+} from './focused-agent-row-highlight'
 import { buildAttentionByWorktree, type WorktreeAttention } from './smart-attention'
 
 export type AttentionPane = { paneKey: string; tabId: string; leafId: string }
@@ -18,6 +24,7 @@ export type AttentionTarget = {
   worktreeId: string
   // Why nullable: title-heuristic promotions carry no pane key, so only the worktree can be activated.
   pane: AttentionPane | null
+  executionHostId?: ExecutionHostId
 }
 
 /**
@@ -99,12 +106,30 @@ export function pickNextAttentionTarget(args: {
   return worktreeId === null ? null : { worktreeId, pane: panesOf(worktreeId)[0] ?? null }
 }
 
+/** Focused agent pane in the active worktree, whether it is a terminal pane or a structured chat tab. */
+export function resolveFocusedAttentionPaneKey(
+  state: FocusedAgentRowHighlightState & Pick<AppState, 'getActiveTab'>
+): string | null {
+  const { activeWorktreeId } = state
+  if (!activeWorktreeId) {
+    return null
+  }
+  if (state.activeTabType === 'agent-session') {
+    // Why: the sidebar highlight helper is terminal-only; structured tabs key their status by this projection.
+    const tab = state.getActiveTab(activeWorktreeId)
+    return tab?.contentType === 'agent-session'
+      ? structuredAgentSessionPaneKey(tab.id, tab.entityId)
+      : null
+  }
+  return getFocusedAgentPaneKeyForWorktree(state, activeWorktreeId)
+}
+
 /** Side-effect free, so the shortcut can decline the chord before claiming it. */
 export function resolveNextAttentionTarget(): AttentionTarget | null {
   const state = useAppStore.getState()
   const now = Date.now()
   const worktrees = getAllWorktreesFromState(state).filter((worktree) => !worktree.isArchived)
-  return pickNextAttentionTarget({
+  const target = pickNextAttentionTarget({
     attentionByWorktree: buildAttentionByWorktree(
       worktrees,
       state.tabsByWorktree,
@@ -116,9 +141,7 @@ export function resolveNextAttentionTarget(): AttentionTarget | null {
       state.terminalLayoutsByTabId
     ),
     activeWorktreeId: state.activeWorktreeId,
-    focusedPaneKey: state.activeWorktreeId
-      ? getFocusedAgentPaneKeyForWorktree(state, state.activeWorktreeId)
-      : null,
+    focusedPaneKey: resolveFocusedAttentionPaneKey(state),
     ownedTabIds: (worktreeId) =>
       new Set([
         ...(state.tabsByWorktree[worktreeId] ?? []).map((tab) => tab.id),
@@ -129,11 +152,20 @@ export function resolveNextAttentionTarget(): AttentionTarget | null {
     agentStatusByPaneKey: state.agentStatusByPaneKey,
     now
   })
+  if (target === null) {
+    return null
+  }
+  // Why: host-qualified worktrees need their host so activation resolves the same row the sidebar shows.
+  const hostId = worktrees.find((worktree) => worktree.id === target.worktreeId)?.hostId
+  return hostId ? { ...target, executionHostId: hostId } : target
 }
 
 /** Mirrors the sidebar agent-row click: activate the worktree, then focus and acknowledge the pane. */
 export function focusAttentionTarget(target: AttentionTarget): void {
-  activateAndRevealWorktree(target.worktreeId)
+  activateAndRevealWorktree(
+    target.worktreeId,
+    target.executionHostId ? { executionHostId: target.executionHostId } : {}
+  )
   const { pane } = target
   if (pane === null) {
     return
